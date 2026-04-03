@@ -11,26 +11,48 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #f4f0ea; font-family: 'Instrument Sans', sans-serif; }
-    input:focus, textarea:focus { outline: none; border-color: #c9a66b !important; box-shadow: 0 0 0 3px rgba(201,166,107,0.12) !important; }
+    input:focus, textarea:focus, select:focus { outline: none; border-color: #c9a66b !important; box-shadow: 0 0 0 3px rgba(201,166,107,0.12) !important; }
     input::placeholder, textarea::placeholder { color: #c4bfb5; }
     @keyframes slideUp { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
     @keyframes popIn { 0%{transform:scale(0)} 70%{transform:scale(1.15)} 100%{transform:scale(1)} }
+    @keyframes fadeIn { from { opacity:0; } to { opacity:1; } }
     .row-anim { animation: slideUp 0.25s ease-out; }
     button { cursor: pointer; transition: all 0.15s ease; font-family: inherit; }
     input[type=number]::-webkit-inner-spin-button { opacity: 0.3; }
+    .modal-overlay { animation: fadeIn 0.2s ease; }
   </style>
 </head>
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    const { useState, useCallback } = React;
+    const { useState, useCallback, useEffect, useRef } = React;
 
-    /* ─── PDF Writer ─── */
+    /* ── Storage helpers ── */
+    const CLIENTS_KEY = "nh_invoice_clients";
+    const INVOICE_NUM_KEY = "nh_invoice_number";
+
+    function loadClients() {
+      try { return JSON.parse(localStorage.getItem(CLIENTS_KEY)) || []; } catch { return []; }
+    }
+    function saveClients(clients) {
+      localStorage.setItem(CLIENTS_KEY, JSON.stringify(clients));
+    }
+    function loadNextInvoiceNum() {
+      try { return parseInt(localStorage.getItem(INVOICE_NUM_KEY)) || 1; } catch { return 1; }
+    }
+    function saveNextInvoiceNum(n) {
+      localStorage.setItem(INVOICE_NUM_KEY, String(n));
+    }
+
+    /* ── Unique ID generator ── */
+    let _uid = Date.now();
+    function uid() { return ++_uid; }
+
+    /* ── PDF Writer ── */
     function buildPDF(inv, subtotal, tax, total) {
       const fmt = (n) => n.toFixed(2);
       const W = 612, H = 792;
-      const objects = [];
-      let objN = 0;
+      const objects = []; let objN = 0;
       const newObj = () => { objN++; objects.push({ id: objN, data: "" }); return objN; };
       const setObj = (id, d) => { objects[id - 1].data = d; };
       const catId = newObj(), pagesId = newObj(), pageId = newObj(), fontId = newObj(), fontBoldId = newObj(), streamId = newObj();
@@ -40,123 +62,160 @@
       setObj(fontBoldId, `<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>`);
       let s = "";
       const esc = (str) => str.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
-      const text = (x, y, str, size, bold) => { s += `BT /${bold ? "F2" : "F1"} ${size} Tf ${x} ${y} Td (${esc(str)}) Tj ET\n`; };
-      const textR = (x, y, str, size, bold) => { const cw = size * (bold ? 0.58 : 0.5); text(x - str.length * cw, y, str, size, bold); };
+      const text = (x, y, str, sz, b) => { s += `BT /${b?"F2":"F1"} ${sz} Tf ${x} ${y} Td (${esc(str)}) Tj ET\n`; };
+      const textR = (x, y, str, sz, b) => { const cw = sz * (b ? 0.58 : 0.5); text(x - str.length * cw, y, str, sz, b); };
       const line = (x1, y1, x2, y2, w = 0.5) => { s += `${w} w ${x1} ${y1} m ${x2} ${y2} l S\n`; };
       const setC = (r, g, b) => { s += `${r} ${g} ${b} rg ${r} ${g} ${b} RG\n`; };
       const rect = (x, y, w, h, r, g, b) => { s += `${r} ${g} ${b} rg ${x} ${y} ${w} ${h} re f\n`; };
 
-      rect(0, H - 8, W, 8, 0.788, 0.651, 0.42);
-      setC(0.176, 0.165, 0.149);
-      text(50, H - 60, inv.fromName || "Your Name", 18, true);
-      if (inv.fromEmail) { setC(0.478, 0.455, 0.42); text(50, H - 76, inv.fromEmail, 9, false); }
-      if (inv.fromPhone) { setC(0.478, 0.455, 0.42); text(50, H - 88, inv.fromPhone, 9, false); }
-      setC(0.788, 0.651, 0.42);
-      textR(W - 50, H - 55, "INVOICE", 28, false);
-      setC(0.478, 0.455, 0.42);
-      textR(W - 50, H - 75, `#${inv.invoiceNumber}`, 10, false);
-      textR(W - 50, H - 89, inv.dueTerm, 10, false);
-      textR(W - 50, H - 103, `Issued ${inv.issueDate}`, 10, false);
+      rect(0, H-8, W, 8, 0.788, 0.651, 0.42);
+      setC(0.176,0.165,0.149); text(50, H-60, inv.fromName||"Your Name", 18, true);
+      if(inv.fromEmail){setC(0.478,0.455,0.42); text(50,H-76,inv.fromEmail,9,false);}
+      if(inv.fromPhone){setC(0.478,0.455,0.42); text(50,H-88,inv.fromPhone,9,false);}
+      setC(0.788,0.651,0.42); textR(W-50,H-55,"INVOICE",28,false);
+      setC(0.478,0.455,0.42);
+      textR(W-50,H-75,`#${inv.invoiceNumber}`,10,false);
+      textR(W-50,H-89,inv.dueTerm,10,false);
+      textR(W-50,H-103,`Issued ${inv.issueDate}`,10,false);
 
-      let yS = H - 140;
-      setC(0.71, 0.682, 0.624); text(50, yS, "FROM", 7, true); text(230, yS, "BILL TO", 7, true);
-      setC(0.176, 0.165, 0.149); text(50, yS - 16, inv.fromName || "", 11, true); text(230, yS - 16, inv.toName || "", 11, true);
-      if (inv.toEmail) { setC(0.478, 0.455, 0.42); text(230, yS - 30, inv.toEmail, 9, false); }
+      let yS=H-140;
+      setC(0.71,0.682,0.624); text(50,yS,"FROM",7,true); text(230,yS,"BILL TO",7,true);
+      setC(0.176,0.165,0.149); text(50,yS-16,inv.fromName||"",11,true); text(230,yS-16,inv.toName||"",11,true);
+      if(inv.toEmail){setC(0.478,0.455,0.42); text(230,yS-30,inv.toEmail,9,false);}
 
-      let yT = yS - 65;
-      setC(0.176, 0.165, 0.149); line(50, yT + 12, W - 50, yT + 12, 1.2);
-      setC(0.478, 0.455, 0.42);
-      text(50, yT, "DESCRIPTION", 7, true); text(320, yT, "QTY", 7, true); textR(440, yT, "PRICE, USD", 7, true); textR(W - 50, yT, "AMOUNT, USD", 7, true);
-      setC(0.91, 0.89, 0.859); line(50, yT - 8, W - 50, yT - 8, 0.4);
+      let yT=yS-65;
+      setC(0.176,0.165,0.149); line(50,yT+12,W-50,yT+12,1.2);
+      setC(0.478,0.455,0.42);
+      text(50,yT,"DESCRIPTION",7,true); text(320,yT,"QTY",7,true); textR(440,yT,"PRICE, USD",7,true); textR(W-50,yT,"AMOUNT, USD",7,true);
+      setC(0.91,0.89,0.859); line(50,yT-8,W-50,yT-8,0.4);
 
-      let y = yT - 26;
-      for (const item of inv.items) {
-        const amt = item.qty * item.price;
-        setC(0.176, 0.165, 0.149);
-        text(50, y, item.description || "", 10, false);
-        text(328, y, String(item.qty), 10, false);
-        textR(440, y, `$${fmt(item.price)}`, 10, false);
-        textR(W - 50, y, `$${fmt(amt)}`, 10, true);
-        setC(0.941, 0.922, 0.89); line(50, y - 10, W - 50, y - 10, 0.3);
-        y -= 26;
+      let y=yT-26;
+      for(const item of inv.items){
+        const amt=item.qty*item.price;
+        setC(0.176,0.165,0.149);
+        text(50,y,item.description||"",10,false);
+        text(328,y,String(item.qty),10,false);
+        textR(440,y,`$${fmt(item.price)}`,10,false);
+        textR(W-50,y,`$${fmt(amt)}`,10,true);
+        setC(0.941,0.922,0.89); line(50,y-10,W-50,y-10,0.3);
+        y-=26;
       }
+      y-=12;
+      setC(0.176,0.165,0.149); line(380,y+14,W-50,y+14,1.2);
+      text(380,y,"Total",14,true); textR(W-50,y,`$${fmt(total)}`,14,true);
+      setC(0.71,0.682,0.624); textR(W-50,y-14,"USD",8,false);
+      if(inv.notes){y-=50;setC(0.71,0.682,0.624);text(50,y,"NOTES",7,true);setC(0.478,0.455,0.42);let ny=y-16;for(const nl of inv.notes.split("\n")){text(50,ny,nl,9,false);ny-=14;}}
+      setC(0.769,0.749,0.71); text(230,35,"Thank you for your business!",8,false);
 
-      y -= 12;
-      setC(0.176, 0.165, 0.149); line(380, y + 14, W - 50, y + 14, 1.2);
-      text(380, y, "Total", 14, true); textR(W - 50, y, `$${fmt(total)}`, 14, true);
-      setC(0.71, 0.682, 0.624); textR(W - 50, y - 14, "USD", 8, false);
-
-      if (inv.notes) { y -= 50; setC(0.71, 0.682, 0.624); text(50, y, "NOTES", 7, true); setC(0.478, 0.455, 0.42); let ny = y - 16; for (const nl of inv.notes.split("\n")) { text(50, ny, nl, 9, false); ny -= 14; } }
-
-      setC(0.769, 0.749, 0.71); text(230, 35, "Thank you for your business!", 8, false);
-
-      const streamContent = s, streamLength = streamContent.length;
-      setObj(streamId, `<< /Length ${streamLength} >>\nstream\n${streamContent}endstream`);
-      setObj(pageId, `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${W} ${H}] /Contents ${streamId} 0 R /Resources << /Font << /F1 ${fontId} 0 R /F2 ${fontBoldId} 0 R >> >> >>`);
-      let pdf = "%PDF-1.4\n";
-      const offsets = [];
-      for (const obj of objects) { offsets.push(pdf.length); pdf += `${obj.id} 0 obj\n${obj.data}\nendobj\n`; }
-      const xrefOff = pdf.length;
-      pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-      for (const off of offsets) pdf += `${String(off).padStart(10, "0")} 00000 n \n`;
-      pdf += `trailer\n<< /Size ${objects.length + 1} /Root ${catId} 0 R >>\nstartxref\n${xrefOff}\n%%EOF`;
+      const sc=s, sl=sc.length;
+      setObj(streamId,`<< /Length ${sl} >>\nstream\n${sc}endstream`);
+      setObj(pageId,`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${W} ${H}] /Contents ${streamId} 0 R /Resources << /Font << /F1 ${fontId} 0 R /F2 ${fontBoldId} 0 R >> >> >>`);
+      let pdf="%PDF-1.4\n"; const offsets=[];
+      for(const obj of objects){offsets.push(pdf.length);pdf+=`${obj.id} 0 obj\n${obj.data}\nendobj\n`;}
+      const xo=pdf.length;
+      pdf+=`xref\n0 ${objects.length+1}\n0000000000 65535 f \n`;
+      for(const off of offsets) pdf+=`${String(off).padStart(10,"0")} 00000 n \n`;
+      pdf+=`trailer\n<< /Size ${objects.length+1} /Root ${catId} 0 R >>\nstartxref\n${xo}\n%%EOF`;
       return pdf;
     }
 
-    /* ─── App ─── */
-    let nextId = 100;
+    /* ── Default Invoice ── */
+    function freshInvoice(num) {
+      return {
+        fromName: "Noemi Harrilal", fromEmail: "", fromPhone: "",
+        toName: "", toEmail: "", toPhone: "",
+        invoiceNumber: String(num).padStart(3, "0"),
+        issueDate: new Date().toISOString().split("T")[0],
+        dueTerm: "Due Upon Receipt", notes: "", taxRate: 0,
+        items: [],
+      };
+    }
 
-    const defaultInvoice = {
-      fromName: "Noemi Harrilal",
-      fromEmail: "",
-      fromPhone: "",
-      toName: "Steven Cloutsis",
-      toEmail: "",
-      toPhone: "",
-      invoiceNumber: "001",
-      issueDate: new Date().toISOString().split("T")[0],
-      dueTerm: "Due Upon Receipt",
-      notes: "",
-      taxRate: 0,
-      items: [
-        { id: 1, description: "Personal Training 3/10/26", qty: 1, price: 70 },
-        { id: 2, description: "Personal Training 3/14/26", qty: 1, price: 70 },
-        { id: 3, description: "Personal Training 3/17/26", qty: 1, price: 70 },
-        { id: 4, description: "Personal Training 3/21/26", qty: 1, price: 70 },
-        { id: 5, description: "Personal Training 3/24/26", qty: 1, price: 70 },
-        { id: 6, description: "Personal Training 3/28/26", qty: 1, price: 70 },
-        { id: 7, description: "Personal Training 3/31/26", qty: 1, price: 70 },
-      ],
-    };
-
+    /* ────────────────── MAIN APP ────────────────── */
     function InvoiceApp() {
-      const [inv, setInv] = useState(defaultInvoice);
+      const [invoiceNum, setInvoiceNum] = useState(() => loadNextInvoiceNum());
+      const [inv, setInv] = useState(() => freshInvoice(loadNextInvoiceNum()));
       const [mode, setMode] = useState("edit");
       const [toast, setToast] = useState("");
+      const [clients, setClients] = useState(() => loadClients());
+      const [showClientPanel, setShowClientPanel] = useState(false);
+      const [newClientName, setNewClientName] = useState("");
+      const [newClientEmail, setNewClientEmail] = useState("");
+      const [newClientPhone, setNewClientPhone] = useState("");
+      const [newClientRate, setNewClientRate] = useState("");
+      const [selectedClientId, setSelectedClientId] = useState(null);
 
-      const update = (k, v) => setInv((p) => ({ ...p, [k]: v }));
-      const updateItem = (id, k, v) =>
-        setInv((p) => ({
+      useEffect(() => { saveClients(clients); }, [clients]);
+
+      const update = (k, v) => setInv(p => ({ ...p, [k]: v }));
+      const updateItem = (itemId, k, v) => {
+        setInv(p => ({
           ...p,
-          items: p.items.map((it) =>
-            it.id === id ? { ...it, [k]: k === "qty" || k === "price" ? (v === "" ? 0 : Number(v)) : v } : it
+          items: p.items.map(it =>
+            it.id === itemId ? { ...it, [k]: k === "qty" || k === "price" ? (v === "" ? 0 : Number(v)) : v } : it
           ),
         }));
-      const addItem = () => setInv((p) => ({ ...p, items: [...p.items, { id: nextId++, description: "", qty: 1, price: 0 }] }));
-      const removeItem = (id) => setInv((p) => ({ ...p, items: p.items.filter((it) => it.id !== id) }));
+      };
+      const addItem = () => {
+        const clientRate = selectedClientId ? (clients.find(c => c.id === selectedClientId) || {}).rate || 0 : 0;
+        setInv(p => ({ ...p, items: [...p.items, { id: uid(), description: "", qty: 1, price: clientRate }] }));
+      };
+      const addSessionRow = () => {
+        const clientRate = selectedClientId ? (clients.find(c => c.id === selectedClientId) || {}).rate || 0 : 0;
+        const today = new Date().toLocaleDateString("en-US", { month: "numeric", day: "numeric", year: "2-digit" });
+        setInv(p => ({ ...p, items: [...p.items, { id: uid(), description: `Personal Training ${today}`, qty: 1, price: clientRate }] }));
+      };
+      const removeItem = (itemId) => {
+        setInv(p => ({ ...p, items: p.items.filter(it => it.id !== itemId) }));
+      };
 
       const subtotal = inv.items.reduce((s, it) => s + it.qty * it.price, 0);
       const tax = subtotal * (inv.taxRate / 100);
       const total = subtotal + tax;
       const fmt = (n) => n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-      const formatDate = (d) => {
-        if (!d) return "";
-        return new Date(d + "T00:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
-      };
+      const formatDate = (d) => { if(!d) return ""; return new Date(d+"T00:00:00").toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"}); };
 
       const flash = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2500); };
 
+      /* Client management */
+      const addClient = () => {
+        if (!newClientName.trim()) return;
+        const c = { id: uid(), name: newClientName.trim(), email: newClientEmail.trim(), phone: newClientPhone.trim(), rate: Number(newClientRate) || 0 };
+        setClients(prev => [...prev, c]);
+        setNewClientName(""); setNewClientEmail(""); setNewClientPhone(""); setNewClientRate("");
+        flash(`${c.name} added!`);
+      };
+      const deleteClient = (id) => {
+        setClients(prev => prev.filter(c => c.id !== id));
+        if (selectedClientId === id) setSelectedClientId(null);
+      };
+      const selectClient = (id) => {
+        const c = clients.find(cl => cl.id === id);
+        if (!c) return;
+        setSelectedClientId(id);
+        setInv(p => ({ ...p, toName: c.name, toEmail: c.email || "", toPhone: c.phone || "" }));
+        // Update existing items that have no custom price to use client rate
+        setInv(p => ({
+          ...p,
+          items: p.items.map(it => it.price === 0 ? { ...it, price: c.rate } : it)
+        }));
+        flash(`Loaded ${c.name} — $${c.rate}/session`);
+      };
+      const updateClientRate = (id, newRate) => {
+        setClients(prev => prev.map(c => c.id === id ? { ...c, rate: Number(newRate) || 0 } : c));
+      };
+
+      /* New invoice */
+      const newInvoice = () => {
+        const next = invoiceNum + 1;
+        setInvoiceNum(next);
+        saveNextInvoiceNum(next);
+        setInv(freshInvoice(next));
+        setSelectedClientId(null);
+        flash("New invoice created!");
+      };
+
+      /* Download */
       const downloadPDF = useCallback(() => {
         try {
           const pdfStr = buildPDF(inv, subtotal, tax, total);
@@ -165,43 +224,118 @@
           const blob = new Blob([bytes], { type: "application/pdf" });
           const a = document.createElement("a");
           a.href = URL.createObjectURL(blob);
-          a.download = `Invoice_${inv.invoiceNumber}_${(inv.toName || "Client").replace(/\s+/g, "_")}.pdf`;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
+          a.download = `Invoice_${inv.invoiceNumber}_${(inv.toName||"Client").replace(/\s+/g,"_")}.pdf`;
+          document.body.appendChild(a); a.click(); document.body.removeChild(a);
+          // Save next invoice number
+          const next = invoiceNum + 1;
+          setInvoiceNum(next);
+          saveNextInvoiceNum(next);
           flash("PDF downloaded!");
-        } catch (e) { console.error(e); alert("Error generating PDF"); }
-      }, [inv, subtotal, tax, total]);
+        } catch(e) { console.error(e); alert("Error generating PDF"); }
+      }, [inv, subtotal, tax, total, invoiceNum]);
 
       const isEdit = mode === "edit";
+      const selectedClient = clients.find(c => c.id === selectedClientId);
 
       return (
         <div style={{ minHeight: "100vh" }}>
-          {/* Top bar */}
-          <div style={{ position: "sticky", top: 0, zIndex: 20, background: "rgba(255,255,255,0.92)", backdropFilter: "blur(12px)", borderBottom: "1px solid #e4dfd6", padding: "12px 24px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          {/* ── Top Bar ── */}
+          <div style={sty.topBar}>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{ width: 34, height: 34, borderRadius: 9, background: "linear-gradient(135deg,#c9a66b,#a8864e)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Playfair Display',serif", fontSize: 13, fontWeight: 700 }}>NH</div>
-              <span style={{ fontFamily: "'Playfair Display',serif", fontSize: 16, color: "#2d2a26", fontWeight: 600 }}>Invoice Builder</span>
+              <div style={sty.logo}>NH</div>
+              <span style={sty.logoText}>Invoice Builder</span>
             </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setMode(isEdit ? "preview" : "edit")}
-                style={{ padding: "7px 16px", borderRadius: 8, border: "1.5px solid #2d2a26", background: "transparent", color: "#2d2a26", fontSize: 13, fontWeight: 600 }}>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+              <button onClick={() => setShowClientPanel(!showClientPanel)}
+                style={{ ...sty.btnOutline, background: showClientPanel ? "#2d2a26" : "transparent", color: showClientPanel ? "#fff" : "#2d2a26" }}>
+                👤 Clients {clients.length > 0 && `(${clients.length})`}
+              </button>
+              <button onClick={newInvoice} style={sty.btnOutline}>+ New Invoice</button>
+              <button onClick={() => setMode(isEdit ? "preview" : "edit")} style={sty.btnOutline}>
                 {isEdit ? "Preview" : "← Edit"}
               </button>
-              <button onClick={downloadPDF}
-                style={{ padding: "7px 18px", borderRadius: 8, border: "none", background: "#2d2a26", color: "#fff", fontSize: 13, fontWeight: 600 }}>
-                ↓ Download PDF
-              </button>
+              <button onClick={downloadPDF} style={sty.btnPrimary}>↓ Download PDF</button>
             </div>
           </div>
 
-          {/* Toast */}
-          {toast && <div style={{ position: "fixed", top: 64, left: "50%", transform: "translateX(-50%)", background: "#2d2a26", color: "#e4d2ad", padding: "9px 22px", borderRadius: 10, fontSize: 13, fontWeight: 600, zIndex: 99, boxShadow: "0 8px 30px rgba(0,0,0,0.18)", animation: "slideUp 0.25s ease" }}>
+          {/* ── Toast ── */}
+          {toast && <div style={sty.toast}>
             <span style={{ animation: "popIn 0.3s ease", display: "inline-block", marginRight: 6 }}>✓</span>{toast}
           </div>}
 
-          {/* Invoice */}
           <div style={{ maxWidth: 800, margin: "24px auto", padding: "0 16px 40px" }}>
+
+            {/* ── Client Panel ── */}
+            {showClientPanel && (
+              <div className="modal-overlay" style={sty.clientPanel}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                  <h3 style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, color: "#2d2a26" }}>Client Directory</h3>
+                  <button onClick={() => setShowClientPanel(false)} style={{ background: "none", border: "none", fontSize: 18, color: "#8a8478" }}>✕</button>
+                </div>
+
+                {/* Add new client */}
+                <div style={{ background: "#faf8f4", borderRadius: 10, padding: 16, marginBottom: 16 }}>
+                  <div style={sty.label}>ADD NEW CLIENT</div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <input value={newClientName} onChange={e => setNewClientName(e.target.value)} placeholder="Client name *" style={{ ...sty.smInput, flex: "1 1 140px" }} />
+                    <input value={newClientEmail} onChange={e => setNewClientEmail(e.target.value)} placeholder="Email" style={{ ...sty.smInput, flex: "1 1 140px" }} />
+                    <input value={newClientPhone} onChange={e => setNewClientPhone(e.target.value)} placeholder="Phone" style={{ ...sty.smInput, flex: "1 1 120px" }} />
+                    <div style={{ position: "relative", flex: "0 0 100px" }}>
+                      <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "#a89f90", fontSize: 13, pointerEvents: "none" }}>$</span>
+                      <input type="number" value={newClientRate} onChange={e => setNewClientRate(e.target.value)} placeholder="Rate" style={{ ...sty.smInput, paddingLeft: 22, textAlign: "right" }} />
+                    </div>
+                    <button onClick={addClient} disabled={!newClientName.trim()}
+                      style={{ ...sty.btnPrimary, opacity: newClientName.trim() ? 1 : 0.4, padding: "6px 16px", fontSize: 13 }}>
+                      + Add
+                    </button>
+                  </div>
+                </div>
+
+                {/* Client list */}
+                {clients.length === 0 ? (
+                  <div style={{ textAlign: "center", padding: "24px 0", color: "#b5ae9f", fontSize: 13 }}>
+                    No clients yet — add your first one above
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {clients.map(c => (
+                      <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", borderRadius: 8, background: selectedClientId === c.id ? "#f0ead8" : "#fff", border: selectedClientId === c.id ? "1.5px solid #c9a66b" : "1.5px solid #e8e3db", transition: "all 0.15s" }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 14, fontWeight: 600, color: "#2d2a26" }}>{c.name}</div>
+                          {c.email && <div style={{ fontSize: 11, color: "#8a8478", marginTop: 1 }}>{c.email}</div>}
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                          <span style={{ fontSize: 12, color: "#8a8478" }}>$/session:</span>
+                          <input type="number" value={c.rate || ""} onChange={e => updateClientRate(c.id, e.target.value)}
+                            style={{ width: 64, border: "1.5px solid #e4dfd6", borderRadius: 6, padding: "4px 8px", textAlign: "right", fontSize: 13, background: "#fff", color: "#2d2a26", fontFamily: "inherit" }} />
+                        </div>
+                        <button onClick={() => selectClient(c.id)}
+                          style={{ ...sty.btnOutline, padding: "5px 12px", fontSize: 12, background: selectedClientId === c.id ? "#c9a66b" : "transparent", color: selectedClientId === c.id ? "#fff" : "#2d2a26", borderColor: selectedClientId === c.id ? "#c9a66b" : "#2d2a26" }}>
+                          {selectedClientId === c.id ? "✓ Selected" : "Use"}
+                        </button>
+                        <button onClick={() => deleteClient(c.id)}
+                          style={{ background: "none", border: "none", color: "#d4cfc7", fontSize: 14, fontWeight: 700, padding: "4px 6px", borderRadius: 4 }}
+                          onMouseEnter={e => { e.currentTarget.style.color = "#c0392b"; }}
+                          onMouseLeave={e => { e.currentTarget.style.color = "#d4cfc7"; }}>✕</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── Selected client banner ── */}
+            {selectedClient && !showClientPanel && (
+              <div style={{ background: "#fff", border: "1.5px solid #c9a66b", borderRadius: 10, padding: "10px 18px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center", animation: "slideUp 0.25s ease" }}>
+                <div style={{ fontSize: 13, color: "#2d2a26" }}>
+                  <span style={{ fontWeight: 600 }}>👤 {selectedClient.name}</span>
+                  <span style={{ color: "#8a8478", marginLeft: 12 }}>${selectedClient.rate}/session</span>
+                </div>
+                <button onClick={() => setShowClientPanel(true)} style={{ background: "none", border: "none", color: "#c9a66b", fontSize: 12, fontWeight: 600, textDecoration: "underline" }}>Change</button>
+              </div>
+            )}
+
+            {/* ── Invoice Card ── */}
             <div style={{ background: "#fff", borderRadius: 14, overflow: "hidden", boxShadow: "0 2px 24px rgba(45,42,38,0.06)" }}>
               <div style={{ height: 5, background: "linear-gradient(90deg,#c9a66b,#e4d2ad,#c9a66b)" }} />
               <div style={{ padding: "32px 40px 40px" }}>
@@ -209,41 +343,41 @@
                 {/* Header */}
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 28 }}>
                   <div style={{ flex: 1 }}>
-                    {isEdit ? <input value={inv.fromName} onChange={e => update("fromName", e.target.value)} placeholder="Your Name / Business" style={sty.bigInput} />
-                      : <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 600, color: "#2d2a26" }}>{inv.fromName}</div>}
-                    {isEdit ? <input value={inv.fromEmail} onChange={e => update("fromEmail", e.target.value)} placeholder="your@email.com" style={{ ...sty.smInput, marginTop: 6 }} />
+                    {isEdit ? <input value={inv.fromName} onChange={e=>update("fromName",e.target.value)} placeholder="Your Name / Business" style={sty.bigInput}/>
+                      : <div style={{fontFamily:"'Playfair Display',serif",fontSize:22,fontWeight:600,color:"#2d2a26"}}>{inv.fromName}</div>}
+                    {isEdit ? <input value={inv.fromEmail} onChange={e=>update("fromEmail",e.target.value)} placeholder="your@email.com" style={{...sty.smInput,marginTop:6}}/>
                       : inv.fromEmail && <div style={sty.meta}>{inv.fromEmail}</div>}
-                    {isEdit ? <input value={inv.fromPhone} onChange={e => update("fromPhone", e.target.value)} placeholder="(555) 123-4567" style={{ ...sty.smInput, marginTop: 4 }} />
+                    {isEdit ? <input value={inv.fromPhone} onChange={e=>update("fromPhone",e.target.value)} placeholder="(555) 123-4567" style={{...sty.smInput,marginTop:4}}/>
                       : inv.fromPhone && <div style={sty.meta}>{inv.fromPhone}</div>}
                   </div>
-                  <div style={{ textAlign: "right", marginLeft: 24 }}>
-                    <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 30, color: "#c9a66b", letterSpacing: 4 }}>INVOICE</div>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 4, marginTop: 6 }}>
-                      <span style={{ color: "#8a8478", fontSize: 12 }}>#</span>
-                      {isEdit ? <input value={inv.invoiceNumber} onChange={e => update("invoiceNumber", e.target.value)} style={{ ...sty.smInput, width: 70, textAlign: "right" }} />
-                        : <span style={{ fontSize: 13, fontWeight: 600 }}>{inv.invoiceNumber}</span>}
+                  <div style={{textAlign:"right",marginLeft:24}}>
+                    <div style={{fontFamily:"'Playfair Display',serif",fontSize:30,color:"#c9a66b",letterSpacing:4}}>INVOICE</div>
+                    <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:4,marginTop:6}}>
+                      <span style={{color:"#8a8478",fontSize:12}}>#</span>
+                      {isEdit ? <input value={inv.invoiceNumber} onChange={e=>update("invoiceNumber",e.target.value)} style={{...sty.smInput,width:70,textAlign:"right"}}/>
+                        : <span style={{fontSize:13,fontWeight:600}}>{inv.invoiceNumber}</span>}
                     </div>
-                    {isEdit ? <input type="date" value={inv.issueDate} onChange={e => update("issueDate", e.target.value)} style={{ ...sty.smInput, marginTop: 6, textAlign: "right" }} />
-                      : <div style={{ ...sty.meta, marginTop: 4 }}>Issued {formatDate(inv.issueDate)}</div>}
-                    {isEdit ? <input value={inv.dueTerm} onChange={e => update("dueTerm", e.target.value)} placeholder="Due Upon Receipt" style={{ ...sty.smInput, marginTop: 4, textAlign: "right" }} />
-                      : <div style={{ ...sty.meta, marginTop: 2 }}>{inv.dueTerm}</div>}
+                    {isEdit ? <input type="date" value={inv.issueDate} onChange={e=>update("issueDate",e.target.value)} style={{...sty.smInput,marginTop:6,textAlign:"right"}}/>
+                      : <div style={{...sty.meta,marginTop:4}}>Issued {formatDate(inv.issueDate)}</div>}
+                    {isEdit ? <input value={inv.dueTerm} onChange={e=>update("dueTerm",e.target.value)} placeholder="Due Upon Receipt" style={{...sty.smInput,marginTop:4,textAlign:"right"}}/>
+                      : <div style={{...sty.meta,marginTop:2}}>{inv.dueTerm}</div>}
                   </div>
                 </div>
 
                 {/* From / Bill To */}
-                <div style={{ display: "flex", gap: 24, marginBottom: 28 }}>
-                  <div style={{ flex: 1, padding: "14px 18px", background: "#faf8f4", borderRadius: 10 }}>
+                <div style={{display:"flex",gap:24,marginBottom:28}}>
+                  <div style={{flex:1,padding:"14px 18px",background:"#faf8f4",borderRadius:10}}>
                     <div style={sty.label}>FROM</div>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: "#2d2a26" }}>{inv.fromName || "—"}</div>
+                    <div style={{fontSize:14,fontWeight:600,color:"#2d2a26"}}>{inv.fromName||"—"}</div>
                   </div>
-                  <div style={{ flex: 1, padding: "14px 18px", background: "#faf8f4", borderRadius: 10 }}>
+                  <div style={{flex:1,padding:"14px 18px",background:"#faf8f4",borderRadius:10}}>
                     <div style={sty.label}>BILL TO</div>
                     {isEdit ? <>
-                      <input value={inv.toName} onChange={e => update("toName", e.target.value)} placeholder="Client name" style={{ ...sty.smInput, fontWeight: 600, fontSize: 14 }} />
-                      <input value={inv.toEmail} onChange={e => update("toEmail", e.target.value)} placeholder="Client email" style={{ ...sty.smInput, marginTop: 4 }} />
-                      <input value={inv.toPhone} onChange={e => update("toPhone", e.target.value)} placeholder="Client phone" style={{ ...sty.smInput, marginTop: 4 }} />
+                      <input value={inv.toName} onChange={e=>update("toName",e.target.value)} placeholder="Client name" style={{...sty.smInput,fontWeight:600,fontSize:14}}/>
+                      <input value={inv.toEmail} onChange={e=>update("toEmail",e.target.value)} placeholder="Client email" style={{...sty.smInput,marginTop:4}}/>
+                      <input value={inv.toPhone} onChange={e=>update("toPhone",e.target.value)} placeholder="Client phone" style={{...sty.smInput,marginTop:4}}/>
                     </> : <>
-                      <div style={{ fontSize: 14, fontWeight: 600, color: "#2d2a26" }}>{inv.toName || "—"}</div>
+                      <div style={{fontSize:14,fontWeight:600,color:"#2d2a26"}}>{inv.toName||"—"}</div>
                       {inv.toEmail && <div style={sty.meta}>{inv.toEmail}</div>}
                       {inv.toPhone && <div style={sty.meta}>{inv.toPhone}</div>}
                     </>}
@@ -251,86 +385,101 @@
                 </div>
 
                 {/* Items Table */}
-                <div style={{ border: "1.5px solid #e8e3db", borderRadius: 10, overflow: "hidden" }}>
-                  <div style={{ display: "flex", alignItems: "center", padding: "10px 16px", background: "#f7f4ee", borderBottom: "1.5px solid #e8e3db", gap: 8 }}>
-                    <div style={{ flex: 3, ...sty.colHead }}>Description</div>
-                    <div style={{ width: 64, ...sty.colHead, textAlign: "center" }}>Qty</div>
-                    <div style={{ width: 105, ...sty.colHead, textAlign: "right" }}>Price, USD</div>
-                    <div style={{ width: 110, ...sty.colHead, textAlign: "right" }}>Amount, USD</div>
-                    {isEdit && <div style={{ width: 36 }} />}
+                <div style={{border:"1.5px solid #e8e3db",borderRadius:10,overflow:"hidden"}}>
+                  <div style={{display:"flex",alignItems:"center",padding:"10px 16px",background:"#f7f4ee",borderBottom:"1.5px solid #e8e3db",gap:8}}>
+                    <div style={{flex:3,...sty.colHead}}>Description</div>
+                    <div style={{width:64,...sty.colHead,textAlign:"center"}}>Qty</div>
+                    <div style={{width:105,...sty.colHead,textAlign:"right"}}>Price, USD</div>
+                    <div style={{width:110,...sty.colHead,textAlign:"right"}}>Amount, USD</div>
+                    {isEdit && <div style={{width:36}}/>}
                   </div>
 
+                  {inv.items.length === 0 && (
+                    <div style={{ padding: "24px 16px", textAlign: "center", color: "#b5ae9f", fontSize: 13 }}>
+                      No items yet — add a session or custom row below
+                    </div>
+                  )}
+
                   {inv.items.map((item, i) => (
-                    <div key={item.id} className="row-anim" style={{ display: "flex", alignItems: "center", padding: "6px 16px", gap: 8, borderBottom: i < inv.items.length - 1 ? "1px solid #f0ebe3" : "none", background: i % 2 === 1 ? "#fdfcfa" : "#fff" }}>
-                      <div style={{ flex: 3 }}>
-                        {isEdit ? <input value={item.description} onChange={e => updateItem(item.id, "description", e.target.value)} placeholder="e.g. Personal Training 4/7/26" style={sty.cellInput} />
-                          : <span style={{ fontSize: 13, color: "#2d2a26" }}>{item.description || "—"}</span>}
+                    <div key={item.id} className="row-anim" style={{display:"flex",alignItems:"center",padding:"6px 16px",gap:8,borderBottom:i<inv.items.length-1?"1px solid #f0ebe3":"none",background:i%2===1?"#fdfcfa":"#fff"}}>
+                      <div style={{flex:3}}>
+                        {isEdit ? <input value={item.description} onChange={e=>updateItem(item.id,"description",e.target.value)} placeholder="e.g. Personal Training 4/7/26" style={sty.cellInput}/>
+                          : <span style={{fontSize:13,color:"#2d2a26"}}>{item.description||"—"}</span>}
                       </div>
-                      <div style={{ width: 64 }}>
-                        {isEdit ? <input type="number" min="1" value={item.qty || ""} onChange={e => updateItem(item.id, "qty", e.target.value)} style={{ ...sty.cellInput, textAlign: "center" }} />
-                          : <span style={{ fontSize: 13, color: "#2d2a26", display: "block", textAlign: "center" }}>{item.qty}</span>}
+                      <div style={{width:64}}>
+                        {isEdit ? <input type="number" min="1" value={item.qty||""} onChange={e=>updateItem(item.id,"qty",e.target.value)} style={{...sty.cellInput,textAlign:"center"}}/>
+                          : <span style={{fontSize:13,color:"#2d2a26",display:"block",textAlign:"center"}}>{item.qty}</span>}
                       </div>
-                      <div style={{ width: 105 }}>
-                        {isEdit ? <div style={{ position: "relative" }}>
-                          <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "#a89f90", fontSize: 13, pointerEvents: "none" }}>$</span>
-                          <input type="number" min="0" step="0.01" value={item.price || ""} onChange={e => updateItem(item.id, "price", e.target.value)} style={{ ...sty.cellInput, textAlign: "right", paddingLeft: 22 }} />
+                      <div style={{width:105}}>
+                        {isEdit ? <div style={{position:"relative"}}>
+                          <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:"#a89f90",fontSize:13,pointerEvents:"none"}}>$</span>
+                          <input type="number" min="0" step="0.01" value={item.price||""} onChange={e=>updateItem(item.id,"price",e.target.value)} style={{...sty.cellInput,textAlign:"right",paddingLeft:22}}/>
                         </div>
-                          : <span style={{ fontSize: 13, color: "#2d2a26", display: "block", textAlign: "right" }}>${fmt(item.price)}</span>}
+                          : <span style={{fontSize:13,color:"#2d2a26",display:"block",textAlign:"right"}}>${fmt(item.price)}</span>}
                       </div>
-                      <div style={{ width: 110, textAlign: "right" }}>
-                        <span style={{ fontSize: 14, fontWeight: 700, color: "#2d2a26" }}>${fmt(item.qty * item.price)}</span>
+                      <div style={{width:110,textAlign:"right"}}>
+                        <span style={{fontSize:14,fontWeight:700,color:"#2d2a26"}}>${fmt(item.qty*item.price)}</span>
                       </div>
-                      {isEdit && <div style={{ width: 36, textAlign: "center" }}>
-                        <button onClick={() => removeItem(item.id)}
-                          style={{ background: "none", border: "none", color: "#d4cfc7", fontSize: 14, fontWeight: 700, borderRadius: 6, padding: "4px 8px" }}
-                          onMouseEnter={e => { e.currentTarget.style.color = "#c0392b"; e.currentTarget.style.background = "#fdf0ee"; }}
-                          onMouseLeave={e => { e.currentTarget.style.color = "#d4cfc7"; e.currentTarget.style.background = "none"; }}>✕</button>
+                      {isEdit && <div style={{width:36,textAlign:"center"}}>
+                        <button onClick={()=>removeItem(item.id)}
+                          style={{background:"none",border:"none",color:"#d4cfc7",fontSize:14,fontWeight:700,borderRadius:6,padding:"4px 8px"}}
+                          onMouseEnter={e=>{e.currentTarget.style.color="#c0392b";e.currentTarget.style.background="#fdf0ee";}}
+                          onMouseLeave={e=>{e.currentTarget.style.color="#d4cfc7";e.currentTarget.style.background="none";}}>✕</button>
                       </div>}
                     </div>
                   ))}
 
+                  {/* Add row buttons */}
                   {isEdit && (
-                    <button onClick={addItem}
-                      style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, width: "100%", padding: "14px", background: "#faf8f4", border: "none", borderTop: "1.5px dashed #e0dbd1", color: "#a89f90", fontSize: 14, fontWeight: 600 }}
-                      onMouseEnter={e => { e.currentTarget.style.background = "#f5f0e8"; e.currentTarget.style.color = "#c9a66b"; }}
-                      onMouseLeave={e => { e.currentTarget.style.background = "#faf8f4"; e.currentTarget.style.color = "#a89f90"; }}>
-                      <span style={{ fontSize: 20, lineHeight: 1, fontWeight: 400 }}>+</span> Add New Row
-                    </button>
+                    <div style={{ display: "flex", borderTop: "1.5px dashed #e0dbd1" }}>
+                      <button onClick={addSessionRow}
+                        style={{ ...sty.addBtn, flex: 1, borderRight: "1px dashed #e0dbd1", borderRadius: 0 }}
+                        onMouseEnter={e=>{e.currentTarget.style.background="#f5f0e8";e.currentTarget.style.color="#c9a66b";}}
+                        onMouseLeave={e=>{e.currentTarget.style.background="#faf8f4";e.currentTarget.style.color="#a89f90";}}>
+                        ⚡ Add Session (Today)
+                      </button>
+                      <button onClick={addItem}
+                        style={{ ...sty.addBtn, flex: 1, borderRadius: 0 }}
+                        onMouseEnter={e=>{e.currentTarget.style.background="#f5f0e8";e.currentTarget.style.color="#c9a66b";}}
+                        onMouseLeave={e=>{e.currentTarget.style.background="#faf8f4";e.currentTarget.style.color="#a89f90";}}>
+                        + Custom Row
+                      </button>
+                    </div>
                   )}
                 </div>
 
                 {/* Totals */}
-                <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 20 }}>
-                  <div style={{ width: 280, background: "#faf8f4", borderRadius: 10, padding: "16px 20px" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 13, color: "#8a8478" }}>
+                <div style={{display:"flex",justifyContent:"flex-end",marginTop:20}}>
+                  <div style={{width:280,background:"#faf8f4",borderRadius:10,padding:"16px 20px"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",padding:"6px 0",fontSize:13,color:"#8a8478"}}>
                       <span>Subtotal</span><span>${fmt(subtotal)}</span>
                     </div>
                     {isEdit && (
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: 13, color: "#8a8478" }}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",fontSize:13,color:"#8a8478"}}>
                         <span>Tax (%)</span>
-                        <input type="number" min="0" value={inv.taxRate || ""} onChange={e => update("taxRate", Number(e.target.value) || 0)}
-                          style={{ width: 56, border: "1.5px solid #e4dfd6", borderRadius: 6, padding: "4px 8px", textAlign: "right", fontSize: 13, background: "#fff", color: "#2d2a26", fontFamily: "inherit" }} />
+                        <input type="number" min="0" value={inv.taxRate||""} onChange={e=>update("taxRate",Number(e.target.value)||0)}
+                          style={{width:56,border:"1.5px solid #e4dfd6",borderRadius:6,padding:"4px 8px",textAlign:"right",fontSize:13,background:"#fff",color:"#2d2a26",fontFamily:"inherit"}}/>
                       </div>
                     )}
-                    {inv.taxRate > 0 && (
-                      <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontSize: 13, color: "#8a8478" }}>
+                    {inv.taxRate>0 && (
+                      <div style={{display:"flex",justifyContent:"space-between",padding:"6px 0",fontSize:13,color:"#8a8478"}}>
                         <span>Tax ({inv.taxRate}%)</span><span>${fmt(tax)}</span>
                       </div>
                     )}
-                    <div style={{ display: "flex", justifyContent: "space-between", padding: "12px 0 2px", marginTop: 8, borderTop: "2px solid #2d2a26", fontSize: 20, fontWeight: 700, color: "#2d2a26" }}>
+                    <div style={{display:"flex",justifyContent:"space-between",padding:"12px 0 2px",marginTop:8,borderTop:"2px solid #2d2a26",fontSize:20,fontWeight:700,color:"#2d2a26"}}>
                       <span>Total</span><span>${fmt(total)}</span>
                     </div>
-                    <div style={{ textAlign: "right", fontSize: 10, color: "#b5ae9f", marginTop: 2 }}>USD</div>
+                    <div style={{textAlign:"right",fontSize:10,color:"#b5ae9f",marginTop:2}}>USD</div>
                   </div>
                 </div>
 
                 {/* Notes */}
-                {(isEdit || inv.notes) && (
-                  <div style={{ marginTop: 28, paddingTop: 16, borderTop: "1px solid #f0ebe3" }}>
+                {(isEdit||inv.notes) && (
+                  <div style={{marginTop:28,paddingTop:16,borderTop:"1px solid #f0ebe3"}}>
                     <div style={sty.label}>NOTES</div>
-                    {isEdit ? <textarea value={inv.notes} onChange={e => update("notes", e.target.value)} rows={3} placeholder="Payment instructions, thank you note, etc."
-                      style={{ width: "100%", border: "1.5px solid #e4dfd6", borderRadius: 8, padding: "10px 12px", fontSize: 13, color: "#2d2a26", background: "#fff", resize: "vertical", fontFamily: "inherit", lineHeight: 1.6 }} />
-                      : <div style={{ fontSize: 13, color: "#8a8478", whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{inv.notes}</div>}
+                    {isEdit ? <textarea value={inv.notes} onChange={e=>update("notes",e.target.value)} rows={3} placeholder="Payment instructions, thank you note, etc."
+                      style={{width:"100%",border:"1.5px solid #e4dfd6",borderRadius:8,padding:"10px 12px",fontSize:13,color:"#2d2a26",background:"#fff",resize:"vertical",fontFamily:"inherit",lineHeight:1.6}}/>
+                      : <div style={{fontSize:13,color:"#8a8478",whiteSpace:"pre-wrap",lineHeight:1.6}}>{inv.notes}</div>}
                   </div>
                 )}
               </div>
@@ -341,21 +490,20 @@
     }
 
     const sty = {
-      bigInput: {
-        fontFamily: "'Playfair Display',serif", fontSize: 22, fontWeight: 600, color: "#2d2a26",
-        border: "1.5px solid #e4dfd6", borderRadius: 8, padding: "6px 10px", width: "100%", background: "#fff",
-      },
-      smInput: {
-        fontSize: 13, color: "#2d2a26", border: "1.5px solid #e4dfd6", borderRadius: 6, padding: "5px 10px",
-        width: "100%", background: "#fff", fontFamily: "'Instrument Sans',sans-serif",
-      },
-      cellInput: {
-        fontSize: 13, color: "#2d2a26", border: "1.5px solid #e4dfd6", borderRadius: 6, padding: "7px 10px",
-        width: "100%", background: "#fff", fontFamily: "'Instrument Sans',sans-serif",
-      },
-      meta: { fontSize: 12, color: "#8a8478", marginTop: 3 },
-      label: { fontSize: 9, fontWeight: 700, letterSpacing: 2, color: "#b5ae9f", marginBottom: 6, textTransform: "uppercase" },
-      colHead: { fontSize: 9, fontWeight: 700, letterSpacing: 1.2, color: "#8a8478", textTransform: "uppercase" },
+      topBar: { position:"sticky",top:0,zIndex:20,background:"rgba(255,255,255,0.92)",backdropFilter:"blur(12px)",borderBottom:"1px solid #e4dfd6",padding:"12px 24px",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10 },
+      logo: { width:34,height:34,borderRadius:9,background:"linear-gradient(135deg,#c9a66b,#a8864e)",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Playfair Display',serif",fontSize:13,fontWeight:700 },
+      logoText: { fontFamily:"'Playfair Display',serif",fontSize:16,color:"#2d2a26",fontWeight:600 },
+      btnOutline: { padding:"7px 14px",borderRadius:8,border:"1.5px solid #2d2a26",background:"transparent",color:"#2d2a26",fontSize:13,fontWeight:600 },
+      btnPrimary: { padding:"7px 18px",borderRadius:8,border:"none",background:"#2d2a26",color:"#fff",fontSize:13,fontWeight:600 },
+      toast: { position:"fixed",top:64,left:"50%",transform:"translateX(-50%)",background:"#2d2a26",color:"#e4d2ad",padding:"9px 22px",borderRadius:10,fontSize:13,fontWeight:600,zIndex:99,boxShadow:"0 8px 30px rgba(0,0,0,0.18)",animation:"slideUp 0.25s ease" },
+      clientPanel: { background:"#fff",borderRadius:14,padding:"24px 28px",marginBottom:20,boxShadow:"0 2px 24px rgba(45,42,38,0.06)",border:"1.5px solid #e8e3db" },
+      bigInput: { fontFamily:"'Playfair Display',serif",fontSize:22,fontWeight:600,color:"#2d2a26",border:"1.5px solid #e4dfd6",borderRadius:8,padding:"6px 10px",width:"100%",background:"#fff" },
+      smInput: { fontSize:13,color:"#2d2a26",border:"1.5px solid #e4dfd6",borderRadius:6,padding:"5px 10px",width:"100%",background:"#fff",fontFamily:"'Instrument Sans',sans-serif" },
+      cellInput: { fontSize:13,color:"#2d2a26",border:"1.5px solid #e4dfd6",borderRadius:6,padding:"7px 10px",width:"100%",background:"#fff",fontFamily:"'Instrument Sans',sans-serif" },
+      meta: { fontSize:12,color:"#8a8478",marginTop:3 },
+      label: { fontSize:9,fontWeight:700,letterSpacing:2,color:"#b5ae9f",marginBottom:6,textTransform:"uppercase" },
+      colHead: { fontSize:9,fontWeight:700,letterSpacing:1.2,color:"#8a8478",textTransform:"uppercase" },
+      addBtn: { display:"flex",alignItems:"center",justifyContent:"center",gap:6,padding:"13px",background:"#faf8f4",border:"none",color:"#a89f90",fontSize:13,fontWeight:600 },
     };
 
     ReactDOM.createRoot(document.getElementById("root")).render(<InvoiceApp />);
