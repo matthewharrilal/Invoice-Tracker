@@ -76,7 +76,7 @@
       setC(0.478,0.455,0.42);
       textR(W-50,H-75,`#${inv.invoiceNumber}`,10,false);
       textR(W-50,H-89,inv.dueTerm,10,false);
-      textR(W-50,H-103,`Issued ${inv.issueDate}`,10,false);
+      textR(W-50,H-103,`Issued ${(() => { if(!inv.issueDate) return ""; const d=new Date(inv.issueDate+"T00:00:00"); return d.toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"}); })()}`,10,false);
 
       let yS=H-140;
       setC(0.71,0.682,0.624); text(50,yS,"FROM",7,true); text(230,yS,"BILL TO",7,true);
@@ -125,7 +125,7 @@
         fromName: "Noemi Harrilal", fromEmail: "", fromPhone: "",
         toName: "", toEmail: "", toPhone: "",
         invoiceNumber: String(num).padStart(3, "0"),
-        issueDate: new Date().toISOString().split("T")[0],
+        issueDate: (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; })(),
         dueTerm: "Due Upon Receipt", notes: "", taxRate: 0,
         items: [],
       };
@@ -156,14 +156,16 @@
           ),
         }));
       };
+      function getLocalDate() {
+        const d = new Date();
+        return `${d.getMonth()+1}/${d.getDate()}/${String(d.getFullYear()).slice(-2)}`;
+      }
+      const getClientRate = () => selectedClientId ? (clients.find(c => c.id === selectedClientId) || {}).rate || 0 : 0;
       const addItem = () => {
-        const clientRate = selectedClientId ? (clients.find(c => c.id === selectedClientId) || {}).rate || 0 : 0;
-        setInv(p => ({ ...p, items: [...p.items, { id: uid(), description: "", qty: 1, price: clientRate }] }));
+        setInv(p => ({ ...p, items: [...p.items, { id: uid(), description: "Personal Training ", qty: 1, price: getClientRate() }] }));
       };
       const addSessionRow = () => {
-        const clientRate = selectedClientId ? (clients.find(c => c.id === selectedClientId) || {}).rate || 0 : 0;
-        const today = new Date().toLocaleDateString("en-US", { month: "numeric", day: "numeric", year: "2-digit" });
-        setInv(p => ({ ...p, items: [...p.items, { id: uid(), description: `Personal Training ${today}`, qty: 1, price: clientRate }] }));
+        setInv(p => ({ ...p, items: [...p.items, { id: uid(), description: `Personal Training ${getLocalDate()}`, qty: 1, price: getClientRate() }] }));
       };
       const removeItem = (itemId) => {
         setInv(p => ({ ...p, items: p.items.filter(it => it.id !== itemId) }));
@@ -403,7 +405,9 @@
                   {inv.items.map((item, i) => (
                     <div key={item.id} className="row-anim" style={{display:"flex",alignItems:"center",padding:"6px 16px",gap:8,borderBottom:i<inv.items.length-1?"1px solid #f0ebe3":"none",background:i%2===1?"#fdfcfa":"#fff"}}>
                       <div style={{flex:3}}>
-                        {isEdit ? <input value={item.description} onChange={e=>updateItem(item.id,"description",e.target.value)} placeholder="e.g. Personal Training 4/7/26" style={sty.cellInput}/>
+                        {isEdit ? <input value={item.description} onChange={e=>updateItem(item.id,"description",e.target.value)}
+                          onFocus={e => { if (!e.target.value) updateItem(item.id, "description", "Personal Training "); }}
+                          placeholder="Personal Training ..." style={sty.cellInput}/>
                           : <span style={{fontSize:13,color:"#2d2a26"}}>{item.description||"—"}</span>}
                       </div>
                       <div style={{width:64}}>
@@ -442,7 +446,7 @@
                         style={{ ...sty.addBtn, flex: 1, borderRadius: 0 }}
                         onMouseEnter={e=>{e.currentTarget.style.background="#f5f0e8";e.currentTarget.style.color="#c9a66b";}}
                         onMouseLeave={e=>{e.currentTarget.style.background="#faf8f4";e.currentTarget.style.color="#a89f90";}}>
-                        + Custom Row
+                        + Add Row
                       </button>
                     </div>
                   )}
